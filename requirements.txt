@@ -1,0 +1,8 @@
+gspread
+oauth2client
+openai
+google-auth
+google-auth-oauthlib
+google-api-python-client
+playwright
+python-dotenv

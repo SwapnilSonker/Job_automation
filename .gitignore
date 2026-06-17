@@ -1,0 +1,31 @@
+# ─── Credentials & secrets ───────────────
+.env
+google_creds.json
+gmail_token.json
+
+# ─── LinkedIn session (saved browser state) ───
+linkedin_session/
+
+# ─── Self-healing artifacts ───────────────
+selector_config.json
+screenshots/
+
+# ─── Logs ────────────────────────────────
+outreach.log
+*.log
+
+# ─── Python ──────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# ─── VS Code ─────────────────────────────
+.vscode/
+
+# ─── macOS ───────────────────────────────
+.DS_Store
