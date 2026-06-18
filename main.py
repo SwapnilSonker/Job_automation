@@ -147,24 +147,45 @@ def load_selector_config() -> list:
 ACTIVE_SELECTORS: list = load_selector_config()
 
 # ─────────────────────────────────────────
-# Seen-posts deduplication (persists across runs)
+# Email-based deduplication (replaces text-fingerprint seen_posts.json)
 # ─────────────────────────────────────────
 
-def load_seen_posts() -> set:
-    if os.path.exists(SEEN_POSTS_FILE):
+def load_known_emails() -> set:
+    """
+    Build a set of email addresses we have already processed.
+    Sources: extracted_contacts.csv + email_rate_log.json
+    This replaces the old text-fingerprint seen_posts.json approach.
+    A fresh scrape will always see ALL posts, but discard any whose
+    email is already in our master contact list.
+    """
+    import csv
+    known = set()
+
+    # 1. Every email already in the contacts CSV
+    if os.path.exists(CONTACTS_LOG_FILE):
         try:
-            with open(SEEN_POSTS_FILE) as f:
-                return set(json.load(f))
+            with open(CONTACTS_LOG_FILE, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    email = row.get("Email", "").strip().lower()
+                    if email:
+                        known.add(email)
         except Exception:
             pass
-    return set()
 
-def save_seen_posts(seen: set):
-    try:
-        with open(SEEN_POSTS_FILE, "w") as f:
-            json.dump(list(seen), f)
-    except Exception as e:
-        log.warning(f"[SEEN] Could not save seen_posts.json: {e}")
+    # 2. Every email we have already sent an outreach to
+    if os.path.exists(RATELOG_FILE):
+        try:
+            data = json.loads(Path(RATELOG_FILE).read_text())
+            for entry in data:
+                email = entry.get("email", "").strip().lower()
+                if email:
+                    known.add(email)
+        except Exception:
+            pass
+
+    log.info(f"[DEDUP] Loaded {len(known)} known email(s) from contacts CSV + rate log")
+    return known
 
 # ─────────────────────────────────────────
 # Email rate log (tracks sends for analytics)
@@ -586,7 +607,11 @@ def tool_scrape_linkedin_posts(query: str, max_posts: int) -> dict:
 
 
 
-    seen_posts   = load_seen_posts()      # cross-run dedup
+    # Email-based dedup: load all emails we've already seen/contacted
+    known_emails = load_known_emails()
+    # Track emails found in THIS run to avoid intra-run duplicates
+    this_run_emails: set = set()
+
     posts_text   = []
     search_url   = f"https://www.linkedin.com/search/results/content/?keywords={query.replace(' ', '%20')}"
 
@@ -623,10 +648,11 @@ def tool_scrape_linkedin_posts(query: str, max_posts: int) -> dict:
                     ),
                 }
 
-            collected    = []          # ordered, deduped for this run
-            collected_set = set()      # fast lookup
+            collected    = []          # ordered, for this run (email-deduped)
             scroll_attempts = 0
             max_scrolls = max(8, max_posts // 2)
+            total_elements_found = 0   # Track total raw elements seen before dedup
+            processed_elements_count = 0  # Post memorizer: how many elements we already processed
 
 
             while len(collected) < max_posts and scroll_attempts < max_scrolls:
@@ -636,9 +662,20 @@ def tool_scrape_linkedin_posts(query: str, max_posts: int) -> dict:
                 # 2. Extract text from all visible post elements
                 selector_str = ", ".join(ACTIVE_SELECTORS)
                 post_elements = page.locator(selector_str).all()
-                log.info(f"[SCRAPE] Scroll {scroll_attempts+1}: found {len(post_elements)} elements")
 
-                for el in post_elements:
+                # ── Post Memorizer ──────────────────────────────────────────
+                # LinkedIn always appends new posts at the bottom. We track
+                # how many elements were already processed in previous scrolls
+                # and only iterate the NEW tail slice. This prevents the
+                # exponential re-reading that caused 40-minute runs.
+                new_elements = post_elements[processed_elements_count:]
+                total_elements_found += len(new_elements)
+                log.info(
+                    f"[SCRAPE] Scroll {scroll_attempts+1}: "
+                    f"{len(post_elements)} total | {len(new_elements)} new (skipping {processed_elements_count} already seen)"
+                )
+
+                for el in new_elements:
                     try:
                         # Scroll element into view so 'see more' renders
                         el.scroll_into_view_if_needed(timeout=1500)
@@ -665,71 +702,89 @@ def tool_scrape_linkedin_posts(query: str, max_posts: int) -> dict:
                         ]):
                             continue
 
-                        # Cross-run dedup using first 120 chars as fingerprint
-                        fingerprint = text[:120]
-                        if fingerprint in seen_posts or fingerprint in collected_set:
-                            continue
-
-                        collected.append(text)
-                        collected_set.add(fingerprint)
-
-                        # ── Extract contact IMMEDIATELY after each post is accepted ──
+                        # ── Email-first filter: only keep posts that have a NEW email ──
+                        # This is the core of the new dedup strategy. If the post has
+                        # no email, or the email is already known, discard immediately.
                         emails_found = re.findall(EMAIL_REGEX, text)
-                        if emails_found:
-                            extracted_email = emails_found[0]
-                            # Quick name/company extraction (same logic as tool_extract_contact)
-                            extracted_name = "Hiring Manager"
-                            for pat in NAME_PATTERNS:
-                                m = re.search(pat, text)
-                                if m:
-                                    extracted_name = m.group(1)
-                                    break
-                            extracted_company = ""
-                            for pat in COMPANY_PATTERNS:
-                                m = re.search(pat, text)
-                                if m:
-                                    extracted_company = m.group(1).strip()
-                                    break
-                            jd_summary = _summarize_jd(text)
-                            _append_contact_log(
-                                email=extracted_email,
-                                name=extracted_name,
-                                company=extracted_company,
-                                post_snippet=text,
-                                query=query,
-                                jd_summary=jd_summary,
-                            )
+                        if not emails_found:
+                            continue  # no email in post — not useful
+
+                        extracted_email = emails_found[0]
+                        email_lower = extracted_email.lower()
+
+                        if email_lower in known_emails or email_lower in this_run_emails:
+                            continue  # already contacted or already found this run
+
+                        # New email — accept this post
+                        this_run_emails.add(email_lower)
+                        collected.append(text)
+
+                        # Quick name/company extraction
+                        extracted_name = "Hiring Manager"
+                        for pat in NAME_PATTERNS:
+                            m = re.search(pat, text)
+                            if m:
+                                extracted_name = m.group(1)
+                                break
+                        extracted_company = ""
+                        for pat in COMPANY_PATTERNS:
+                            m = re.search(pat, text)
+                            if m:
+                                extracted_company = m.group(1).strip()
+                                break
+
+                        log.info(f"[SCRAPE] ✅ New contact found: {extracted_email}")
+                        _append_contact_log(
+                            email=extracted_email,
+                            name=extracted_name,
+                            company=extracted_company,
+                            post_snippet=text,
+                            query=query,
+                            jd_summary="",   # populated by mail_agent.py
+                        )
 
                     except Exception:
                         continue
 
+                # Advance the memorizer cursor to the end of the current list
+                processed_elements_count = len(post_elements)
+
                 # 3. Try to click "Load more results" button before scrolling
                 _click_load_more(page)
 
-                # 4. Scroll down
-                page.mouse.wheel(0, random.randint(700, 1400))
+                # 4. Scroll down — use JS scrollBy instead of mouse.wheel.
+                # mouse.wheel only works if the cursor is hovering the right column,
+                # which is unreliable in headless/headful mode both. window.scrollBy
+                # always fires on the document itself, regardless of mouse position.
+                scroll_px = random.randint(700, 1400)
+                page.evaluate(f"window.scrollBy(0, {scroll_px})")
                 time.sleep(random.uniform(*SCROLL_PAUSES))
                 scroll_attempts += 1
 
             posts_text = collected[:max_posts]
-            log.info(f"[SCRAPE] Collected {len(posts_text)} new posts (seen DB: {len(seen_posts)})")
-
-            # Persist seen fingerprints
-            new_fingerprints = {t[:120] for t in posts_text}
-            save_seen_posts(seen_posts | new_fingerprints)
+            log.info(f"[SCRAPE] Collected {len(posts_text)} posts with new emails (known DB: {len(known_emails)} emails)")
 
             if len(posts_text) == 0:
-                log.warning("[HEAL] 0 posts collected — selectors may be stale. Triggering self-heal.")
-                context.close()
-                return {
-                    "posts": [], "count": 0,
-                    "heal_hint": (
-                        f"Scraping returned 0 posts using selectors: {ACTIVE_SELECTORS}. "
-                        f"Call inspect_page_dom with url='{search_url}' to analyse the DOM, "
-                        f"then test_selector_patch, then apply_selector_patch if they match."
-                    ),
-                    "search_url": search_url,
-                }
+                if total_elements_found == 0:
+                    log.warning("[HEAL] 0 posts collected — selectors may be stale. Triggering self-heal.")
+                    context.close()
+                    return {
+                        "posts": [], "count": 0,
+                        "heal_hint": (
+                            f"Scraping returned 0 posts using selectors: {ACTIVE_SELECTORS}. "
+                            f"Call inspect_page_dom with url='{search_url}' to analyse the DOM, "
+                            f"then test_selector_patch, then apply_selector_patch if they match."
+                        ),
+                        "search_url": search_url,
+                    }
+                else:
+                    log.info(f"[SCRAPE] Found {total_elements_found} posts, but 0 NEW posts. Selectors are working perfectly.")
+                    context.close()
+                    return {
+                        "posts": [], "count": 0,
+                        "status": "no_new_posts",
+                        "message": "Scraped successfully but all posts on the page were already seen from previous runs. There are no new openings right now. Tell the user to check back later."
+                    }
 
         except Exception as e:
             log.error(f"Scraping error: {e}")
@@ -1493,6 +1548,11 @@ def dispatch_tool(name: str, args: dict) -> str:
     fn = TOOL_REGISTRY.get(name)
     if fn is None:
         return json.dumps({"error": f"Unknown tool: {name}"})
+    # Guard: LLM sometimes passes null instead of {} for no-arg tools
+    # (run_followups, check_replies). This caused a Python crash:
+    # 'argument after ** must be a mapping, not NoneType'
+    if args is None:
+        args = {}
     try:
         result = fn(**args)
         return json.dumps(result)
@@ -1654,7 +1714,11 @@ def run_agent(task: str = None):
             try:
                 result_json = json.loads(result_str)
                 if fn_name == "scrape_linkedin_posts":
-                    if result_json.get("count", 0) == 0:
+                    if result_json.get("status") == "no_new_posts":
+                        log.info("[AGENT] ✅ Clean exit: No new posts available to scrape.")
+                        print("\n✅ SCRAPE COMPLETE: Scraped successfully but found no new posts on LinkedIn today. All posts were already processed. Check back later!\n")
+                        return
+                    elif result_json.get("count", 0) == 0:
                         consecutive_zero_scrapes += 1
                         log.warning(f"[AGENT] Zero-posts scrape #{consecutive_zero_scrapes}")
                         if consecutive_zero_scrapes >= 2:
@@ -1663,7 +1727,6 @@ def run_agent(task: str = None):
                             print("\n❌ SCRAPING FAILED: 0 posts found on 2 queries. "
                                   "Run the script again — the self-heal will attempt selector repair.\n")
                             return
-                    else:
                         consecutive_zero_scrapes = 0  # reset on successful scrape
             except (json.JSONDecodeError, AttributeError):
                 pass

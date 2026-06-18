@@ -29,3 +29,12 @@ build/
 
 # ─── macOS ───────────────────────────────
 .DS_Store
+
+# ─── Extracted Emails ──────────────────
+all_emails_extracted.csv
+sent_emails.csv
+filtered_emails.csv
+
+# ─── Scripts ───────────────────────────
+fetch_sent_emails.py
+mail_agent.py
