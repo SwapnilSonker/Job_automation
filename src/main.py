@@ -112,7 +112,7 @@ SEE_MORE_SELECTORS = [
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[logging.FileHandler("outreach.log"), logging.StreamHandler()]
+    handlers=[logging.FileHandler("logs/outreach.log"), logging.StreamHandler()]
 )
 log = logging.getLogger(__name__)
 
@@ -120,8 +120,8 @@ log = logging.getLogger(__name__)
 # Self-Healing Selector Config
 # ─────────────────────────────────────────
 
-SELECTOR_CONFIG_FILE = "selector_config.json"
-SCREENSHOT_DIR       = "screenshots"
+SELECTOR_CONFIG_FILE = "config/selector_config.json"
+SCREENSHOT_DIR       = "logs/screenshots"
 # LinkedIn now uses hashed CSS class names — use stable data-attribute selectors instead
 DEFAULT_SELECTORS = [
     "[data-urn*='activity']",
@@ -734,13 +734,20 @@ def tool_scrape_linkedin_posts(query: str, max_posts: int) -> dict:
                                 break
 
                         log.info(f"[SCRAPE] ✅ New contact found: {extracted_email}")
+
+                        # Summarise the JD inline before logging — keeps the CSV/Sheet
+                        # clean (3 dense sentences instead of raw truncated post text)
+                        # and dramatically cuts token cost at email-drafting time.
+                        log.info(f"[JD] Summarising post for {extracted_email}...")
+                        jd_summary = _summarize_jd(text)
+
                         _append_contact_log(
                             email=extracted_email,
                             name=extracted_name,
                             company=extracted_company,
                             post_snippet=text,
                             query=query,
-                            jd_summary="",   # populated by mail_agent.py
+                            jd_summary=jd_summary,
                         )
 
                     except Exception:
@@ -1564,49 +1571,33 @@ def dispatch_tool(name: str, args: dict) -> str:
 # System Prompt
 # ─────────────────────────────────────────
 
-SYSTEM_PROMPT = f"""You are an autonomous HR outreach agent for {YOUR_NAME} ({YOUR_ROLE}).
+SYSTEM_PROMPT = f"""You are a LinkedIn scraping agent for {YOUR_NAME} ({YOUR_ROLE}).
 
-Follow these phases IN ORDER. Complete each phase fully before moving to the next.
+Your ONLY job is PHASE 1 — SCRAPE. Do nothing else.
 
-PHASE 1 — SCRAPE (do this ONCE):
-- Call scrape_linkedin_posts with query "hiring AI engineer".
-- If count >= 5: go to PHASE 2 immediately. Do NOT scrape again.
-- If count < 5: try ONE more query (e.g. "AI engineer hiring India"). Then go to PHASE 2.
-- If count = 0 on BOTH queries: go to SELF-HEAL below.
-- CRITICAL: If scrape returns "fatal_zero_posts": true in the result, you MUST stop
-  immediately and report: "Scraping failed. No posts found. Selector self-heal needed."
-  Do NOT call extract_contact, send_outreach_email, run_followups, or check_replies.
+PHASE 1 — SCRAPE (do this EXACTLY ONCE):
+- Call scrape_linkedin_posts ONCE with the query you were given.
+- ANY count >= 1: report success and STOP. The email pipeline will be handled separately.
+- If count = 0: go to SELF-HEAL below. You may retry scrape ONE time after a heal. That is the absolute maximum.
+- CRITICAL: If scrape returns "fatal_zero_posts": true, STOP immediately and report failure.
 
-PHASE 2 — EXTRACT (do this for EVERY post from PHASE 1):
-- For each post in the posts list returned by scrape, call extract_contact with that EXACT post text.
-- NEVER invent or paraphrase post text. Use only the exact strings from the posts list.
-- Collect all contacts where found=true.
-- Do NOT call any other tool until you have called extract_contact on every single post.
-
-PHASE 3 — SEND:
-- For each contact found in PHASE 2, call check_already_contacted.
-- If already_contacted=false, call send_outreach_email with the REAL name/email/company/post_text.
-- NEVER use placeholder values like "extracted email" or "extracted company". Only use real values.
-- Stop after {DAILY_SEND_LIMIT} sends.
-
-PHASE 4 — FINISH:
-- Call run_followups.
-- Call check_replies.
-- Return a TRUTHFUL summary: posts scraped, emails found, emails ACTUALLY sent (success=true only), follow-ups, replies.
+AFTER SCRAPE:
+- Once scrape returns count >= 1, output a short summary: how many contacts were found, and confirm done.
+- Do NOT call any other tool after a successful scrape.
 
 ABSOLUTE RULES:
-- NEVER open linkedin.com/jobs or any URL other than the search results URL.
-- NEVER call inspect_page_dom, test_selector_patch, or apply_selector_patch unless scrape returns count=0.
-- NEVER invent contacts, emails, or post text. Only use real data from scrape results.
-- NEVER use placeholder strings. If you don't have a real email, skip that contact.
+- NEVER scrape more than once. The system will hard-block any second scrape attempt.
+- NEVER call extract_contact, send_outreach_email, check_already_contacted, run_followups, or check_replies.
+- NEVER call inspect_page_dom, test_selector_patch, or apply_selector_patch after a successful scrape.
+- NEVER invent contacts, emails, or post text.
 - NEVER call apply_selector_patch unless test_selector_patch returned best_match_count > 0.
   When calling apply_selector_patch, pass min_match_count = the best_match_count value.
 
-SELF-HEAL (ONLY when ALL queries return count=0):
+SELF-HEAL (ONLY when scrape returns count=0):
 1. Call inspect_page_dom (url is ignored — it always inspects the correct LinkedIn search page).
 2. Call test_selector_patch with selectors based on data_attrs returned.
 3. If best_match_count > 0: call apply_selector_patch(selectors=..., min_match_count=best_match_count).
-4. Retry scrape. Max 2 heal attempts. If still 0, STOP and report failure.
+4. Retry scrape ONCE. If still 0, STOP and report failure.
 """
 
 # ─────────────────────────────────────────
@@ -1620,11 +1611,9 @@ def run_agent(task: str = None):
     """
     if task is None:
         task = (
-            f"Run the full HR outreach pipeline. "
-            f"Search LinkedIn for '{SEARCH_QUERY}'. "
-            f"Send up to {DAILY_SEND_LIMIT} outreach emails to new contacts. "
-            f"Then run follow-ups and check for replies. "
-            f"Report a summary when done."
+            f"Scrape LinkedIn for '{SEARCH_QUERY}'. "
+            f"Collect up to {MAX_POSTS_PER_RUN} new contacts with emails. "
+            f"Save them to the CSV. Report how many were found."
         )
 
     messages = [
@@ -1639,6 +1628,20 @@ def run_agent(task: str = None):
 
     consecutive_zero_scrapes = 0  # kill-switch: stop after 2 consecutive zero-post scrapes
 
+    # ── Hard programmatic locks ─────────────────────────────────────────────
+    # scrape_done: set to True after the first successful scrape (count > 0).
+    #   Any subsequent attempt by the LLM to call scrape_linkedin_posts is
+    #   intercepted here — before it reaches the tool — and returns an error.
+    # heal_tools_allowed: set to False once scrape succeeds. Prevents the LLM
+    #   from calling inspect_page_dom / test_selector_patch / apply_selector_patch
+    #   after data has already been collected (seen in the wild as hallucination).
+    scrape_done        = False
+    heal_tools_allowed = True   # allowed only while scrape count == 0
+    HEAL_TOOL_NAMES    = {"inspect_page_dom", "test_selector_patch", "apply_selector_patch"}
+
+    # Build a mutable copy of TOOLS so we can strip tools at runtime
+    active_tools = list(TOOLS)
+
     for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
         log.info(f"[AGENT] Iteration {iteration}/{MAX_AGENT_ITERATIONS}")
         time.sleep(3)   # avoid 429 rate-limit on Groq free tier
@@ -1649,7 +1652,7 @@ def run_agent(task: str = None):
             try:
                 response = groq_client.chat.completions.create(
                     model=GROQ_MODEL,
-                    tools=TOOLS,
+                    tools=active_tools,
                     tool_choice="auto",
                     messages=messages,
                     max_tokens=4096,
@@ -1705,29 +1708,79 @@ def run_agent(task: str = None):
             except json.JSONDecodeError:
                 fn_args = {}
 
+            # ── Lock 1: Hard scraper block ───────────────────────────────────
+            # If scrape already succeeded this run, reject any further scrape
+            # calls in Python — the LLM never even gets to call the tool.
+            if fn_name == "scrape_linkedin_posts" and scrape_done:
+                blocked_msg = json.dumps({
+                    "error": "HARD BLOCK: scrape_linkedin_posts has already run successfully "
+                             "this session. You are NOT allowed to scrape again. "
+                             "Move to PHASE 2 (extract_contact) immediately."
+                })
+                log.warning("[AGENT] 🔒 Blocked second scrape attempt — scrape_done=True")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": blocked_msg,
+                })
+                continue
+
+            # ── Lock 2: Hard self-heal block ─────────────────────────────────
+            # Once a successful scrape has been done, self-heal tools are
+            # stripped from active_tools so the LLM cannot call them at all.
+            # If the LLM somehow still requests one (e.g. from context memory),
+            # intercept it here and return an error.
+            if fn_name in HEAL_TOOL_NAMES and not heal_tools_allowed:
+                blocked_msg = json.dumps({
+                    "error": f"HARD BLOCK: {fn_name} is not available after a successful scrape. "
+                             "Self-heal tools are only active when scraping returns 0 posts. "
+                             "Move to PHASE 2 (extract_contact) immediately."
+                })
+                log.warning(f"[AGENT] 🔒 Blocked heal tool '{fn_name}' — heal_tools_allowed=False")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": blocked_msg,
+                })
+                continue
+
             log.info(f"[AGENT] → Calling tool: {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:120]})")
             result_str = dispatch_tool(fn_name, fn_args)
             log.info(f"[AGENT] ← Result: {result_str[:200]}")
 
-            # ── Hard kill-switch: stop if LLM is hallucinating fake scrape data ──
-            # Track consecutive zero-post scrapes. After 2, the LLM is stuck.
+            # ── Post-execution state machine ─────────────────────────────────
             try:
                 result_json = json.loads(result_str)
                 if fn_name == "scrape_linkedin_posts":
                     if result_json.get("status") == "no_new_posts":
                         log.info("[AGENT] ✅ Clean exit: No new posts available to scrape.")
-                        print("\n✅ SCRAPE COMPLETE: Scraped successfully but found no new posts on LinkedIn today. All posts were already processed. Check back later!\n")
-                        return
-                    elif result_json.get("count", 0) == 0:
+                        print("\n✅ SCRAPE COMPLETE: No new posts found today. All contacts already processed. Check back later!\n")
+                        return True   # signal: scrape ran cleanly (even if 0 new)
+                    elif result_json.get("count", 0) > 0:
+                        # Successful scrape — engage both locks immediately
+                        scrape_done        = True
+                        heal_tools_allowed = False
+                        # Strip ALL non-essential tools — only self-heal tools needed for
+                        # the failure path, everything else is handled outside the agent.
+                        active_tools = [
+                            t for t in active_tools
+                            if t["function"]["name"] not in HEAL_TOOL_NAMES
+                            and t["function"]["name"] != "scrape_linkedin_posts"
+                        ]
+                        log.info(
+                            f"[AGENT] 🔒 Scrape successful ({result_json['count']} contacts). "
+                            "Locked: scraper + heal tools removed. Handing off to mail agent."
+                        )
+                        return True   # signal: scrape successful, ready for mail handoff
+                    else:
+                        # Zero posts — self-heal remains allowed
                         consecutive_zero_scrapes += 1
                         log.warning(f"[AGENT] Zero-posts scrape #{consecutive_zero_scrapes}")
                         if consecutive_zero_scrapes >= 2:
-                            log.error("[AGENT] ❌ HARD STOP: 2 consecutive zero-post scrapes. "
-                                      "LLM will hallucinate fake contacts if allowed to continue. Stopping.")
+                            log.error("[AGENT] ❌ HARD STOP: 2 consecutive zero-post scrapes. Stopping.")
                             print("\n❌ SCRAPING FAILED: 0 posts found on 2 queries. "
                                   "Run the script again — the self-heal will attempt selector repair.\n")
-                            return
-                        consecutive_zero_scrapes = 0  # reset on successful scrape
+                            return False
             except (json.JSONDecodeError, AttributeError):
                 pass
 
@@ -1742,6 +1795,7 @@ def run_agent(task: str = None):
 
     else:
         log.warning(f"[AGENT] Reached max iterations ({MAX_AGENT_ITERATIONS}). Stopping.")
+        return False
 
 
 # ─────────────────────────────────────────
@@ -1775,6 +1829,19 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "login":
         login_session()
     elif len(sys.argv) > 1 and sys.argv[1] == "followups":
-        run_agent(task="Run follow-ups for all existing contacts and check for replies. Report a summary.")
+        # Standalone follow-up / reply-check run via mail_agent
+        import mail_agent
+        mail_agent.run(dry_run=False, limit=DAILY_SEND_LIMIT)
     else:
-        run_agent()
+        # ── Phase 1: Scrape ──────────────────────────────────────────────────
+        scrape_ok = run_agent()
+
+        # ── Phase 2 + 3 + 4: Mail (only if scrape succeeded) ────────────────
+        if scrape_ok:
+            log.info("=" * 60)
+            log.info("[PIPELINE] Scrape complete. Handing off to mail agent...")
+            log.info("=" * 60)
+            import mail_agent
+            mail_agent.run(dry_run=False, limit=DAILY_SEND_LIMIT)
+        else:
+            log.warning("[PIPELINE] Scrape did not succeed — mail agent not triggered.")

@@ -36,5 +36,10 @@ sent_emails.csv
 filtered_emails.csv
 
 # ─── Scripts ───────────────────────────
-fetch_sent_emails.py
-mail_agent.py
+# Scripts are now in src/ and should be tracked.
+
+# ─── New Folder Structure ──────────────
+data/
+config/
+browser_state/
+logs/
