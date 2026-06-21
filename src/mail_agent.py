@@ -236,6 +236,49 @@ Output the subject line first, then '---BODY---', then the email body.
     return subject, body
 
 
+def validate_email_with_llm(client: Groq, subject: str, body: str) -> tuple[str, str]:
+    """
+    Validator Agent: Cross-checks the drafted email against the candidate's true constraints.
+    Prevents hallucinating years of experience or false skills.
+    """
+    system_prompt = (
+        "You are a strict QA Validator for job application emails. "
+        "Your job is to read the drafted email below and ensure it does NOT hallucinate "
+        "or lie about the candidate's years of experience. "
+        "TRUE FACTS: The candidate is early-career (1-2 years of experience). They do NOT have 5+ years of experience. "
+        "They are highly skilled in GenAI, RAG, and FastAPI (e.g., building TaxVantage AI). "
+        "TASK: "
+        "If the email falsely claims 5+ years of experience or senior status, REWRITE it to be 100% truthful "
+        "but highly persuasive by pivoting the focus to the complex, production-level projects they have actually built. "
+        "If the email is already truthful and does not lie about years of experience, return it exactly as is. "
+        "Output ONLY two sections separated by a line containing exactly '---BODY---'. "
+        "The first section is the subject line. The second section is the full email body."
+    )
+
+    user_prompt = f"Drafted Subject:\n{subject}\n\nDrafted Body:\n{body}"
+
+    resp = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        temperature=0.3,
+        max_tokens=600,
+    )
+
+    raw = resp.choices[0].message.content.strip()
+
+    if "---BODY---" in raw:
+        parts   = raw.split("---BODY---", 1)
+        new_subject = parts[0].strip()
+        new_body    = parts[1].strip()
+        return new_subject, new_body
+    
+    # Fallback to original if formatting fails
+    return subject, body
+
+
 def send_email(to_email: str, subject: str, body: str, dry_run: bool) -> bool:
     """Send the email via Gmail SMTP with resume attached. Returns success bool."""
     resume_path = BASE_DIR / RESUME_FILE
@@ -311,6 +354,8 @@ def run(dry_run: bool = False, limit: int = DAILY_SEND_LIMIT) -> None:
         # Draft email via LLM
         try:
             subject, body = draft_email_with_llm(client, contact)
+            # Validator Agent Pass
+            subject, body = validate_email_with_llm(client, subject, body)
         except Exception as e:
             log.error(f"[LLM] Failed to draft email for {contact['email']}: {e}")
             failed_count += 1
