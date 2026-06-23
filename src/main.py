@@ -1755,7 +1755,7 @@ def run_agent(task: str = None):
                     if result_json.get("status") == "no_new_posts":
                         log.info("[AGENT] ✅ Clean exit: No new posts available to scrape.")
                         print("\n✅ SCRAPE COMPLETE: No new posts found today. All contacts already processed. Check back later!\n")
-                        return True   # signal: scrape ran cleanly (even if 0 new)
+                        return 0   # signal: scrape ran cleanly but found 0
                     elif result_json.get("count", 0) > 0:
                         # Successful scrape — engage both locks immediately
                         scrape_done        = True
@@ -1771,7 +1771,7 @@ def run_agent(task: str = None):
                             f"[AGENT] 🔒 Scrape successful ({result_json['count']} contacts). "
                             "Locked: scraper + heal tools removed. Handing off to mail agent."
                         )
-                        return True   # signal: scrape successful, ready for mail handoff
+                        return result_json.get("count", 0)   # signal: scrape successful, ready for mail handoff
                     else:
                         # Zero posts — self-heal remains allowed
                         consecutive_zero_scrapes += 1
@@ -1780,7 +1780,7 @@ def run_agent(task: str = None):
                             log.error("[AGENT] ❌ HARD STOP: 2 consecutive zero-post scrapes. Stopping.")
                             print("\n❌ SCRAPING FAILED: 0 posts found on 2 queries. "
                                   "Run the script again — the self-heal will attempt selector repair.\n")
-                            return False
+                            return 0
             except (json.JSONDecodeError, AttributeError):
                 pass
 
@@ -1795,7 +1795,7 @@ def run_agent(task: str = None):
 
     else:
         log.warning(f"[AGENT] Reached max iterations ({MAX_AGENT_ITERATIONS}). Stopping.")
-        return False
+        return 0
 
 
 # ─────────────────────────────────────────
@@ -1833,15 +1833,39 @@ if __name__ == "__main__":
         import mail_agent
         mail_agent.run(dry_run=False, limit=DAILY_SEND_LIMIT)
     else:
-        # ── Phase 1: Scrape ──────────────────────────────────────────────────
-        scrape_ok = run_agent()
+        import role_agent
+        target_roles = role_agent.get_or_update_roles()
+        
+        total_leads_found = 0
+        scrape_ok = False
+        
+        for role in target_roles:
+            task = (
+                f"Scrape LinkedIn for 'hiring {role}'. "
+                f"Collect up to {MAX_POSTS_PER_RUN} new contacts with emails. "
+                f"Save them to the CSV. Report how many were found."
+            )
+            
+            log.info(f"\n[PIPELINE] Starting campaign for role: '{role}'")
+            leads_found = run_agent(task)
+            total_leads_found += leads_found
+            
+            if leads_found >= 3:
+                log.info(f"[PIPELINE] Success! Found {leads_found} leads for '{role}'. Quota met, stopping search.")
+                scrape_ok = True
+                break
+            elif leads_found > 0:
+                log.info(f"[PIPELINE] Found {leads_found} leads for '{role}'. Continuing to next role to hit quota...")
+                scrape_ok = True
+            else:
+                log.warning(f"[PIPELINE] Dry well. 0 leads found for '{role}'. Auto-pivoting to next role...")
 
         # ── Phase 2 + 3 + 4: Mail (only if scrape succeeded) ────────────────
-        if scrape_ok:
+        if scrape_ok and total_leads_found > 0:
             log.info("=" * 60)
-            log.info("[PIPELINE] Scrape complete. Handing off to mail agent...")
+            log.info(f"[PIPELINE] Scrape complete. Found {total_leads_found} total leads. Handing off to mail agent...")
             log.info("=" * 60)
             import mail_agent
             mail_agent.run(dry_run=False, limit=DAILY_SEND_LIMIT)
         else:
-            log.warning("[PIPELINE] Scrape did not succeed — mail agent not triggered.")
+            log.warning("[PIPELINE] Scrape did not succeed or found 0 leads across all roles — mail agent not triggered.")
