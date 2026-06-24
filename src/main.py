@@ -1833,6 +1833,15 @@ if __name__ == "__main__":
         import mail_agent
         mail_agent.run(dry_run=False, limit=DAILY_SEND_LIMIT)
     else:
+        # Delete or empty the selector config before starting the pipeline to force auto-repair
+        if os.path.exists(SELECTOR_CONFIG_FILE):
+            try:
+                os.remove(SELECTOR_CONFIG_FILE)
+                log.info(f"[STARTUP] Deleted {SELECTOR_CONFIG_FILE} to force selector auto-repair.")
+            except Exception as e:
+                log.warning(f"[STARTUP] Could not delete {SELECTOR_CONFIG_FILE}: {e}")
+        ACTIVE_SELECTORS = []
+
         import role_agent
         target_roles = role_agent.get_or_update_roles()
         
