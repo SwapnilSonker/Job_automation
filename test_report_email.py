@@ -8,6 +8,7 @@ Run: python test_report_email.py
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
+# pyrefly: ignore [missing-import]
 from mail_agent import send_run_report
 
 # ── Dummy lead data ────────────────────────────────────────────────────────────
