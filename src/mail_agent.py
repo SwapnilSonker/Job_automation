@@ -315,6 +315,201 @@ def send_email(to_email: str, subject: str, body: str, dry_run: bool) -> bool:
         return False
 
 
+def _build_html_report(contacts_processed: list[dict], sent_count: int, failed_count: int, dry_run: bool) -> str:
+    """Build a beautiful HTML email for the outreach run report."""
+    now = datetime.now().strftime("%B %d, %Y at %H:%M")
+    total = len(contacts_processed)
+    success_rate = round((sent_count / total) * 100) if total > 0 else 0
+
+    # Build lead cards
+    lead_rows = ""
+    for idx, c in enumerate(contacts_processed, start=1):
+        status = c.get("status", "PENDING")
+        status_color = "#10b981" if status == "SENT" else "#ef4444"
+        status_bg    = "#d1fae5" if status == "SENT" else "#fee2e2"
+        snippet = c.get("snippet", "—")[:300]
+        if len(c.get("snippet", "")) > 300:
+            snippet += "…"
+        snippet_html = snippet.replace("\n", "<br>") if snippet else "—"
+
+        lead_rows += f"""
+        <tr>
+          <td style="padding:16px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top;color:#64748b;font-size:13px;font-weight:600;">#{idx}</td>
+          <td style="padding:16px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top;">
+            <div style="font-weight:700;color:#1e293b;font-size:14px;">{c.get('name','N/A')}</div>
+            <div style="color:#64748b;font-size:12px;margin-top:2px;">{c.get('company','N/A')}</div>
+          </td>
+          <td style="padding:16px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top;">
+            <a href="mailto:{c.get('email','')}" style="color:#6366f1;font-size:13px;text-decoration:none;">{c.get('email','N/A')}</a>
+          </td>
+          <td style="padding:16px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top;">
+            <span style="background:{status_bg};color:{status_color};padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.5px;">{status}</span>
+          </td>
+          <td style="padding:16px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top;color:#475569;font-size:12px;max-width:220px;">{c.get('subject','N/A')}</td>
+          <td style="padding:16px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top;color:#94a3b8;font-size:11px;max-width:240px;line-height:1.5;">{snippet_html}</td>
+        </tr>"""
+
+    dry_run_banner = ""
+    if dry_run:
+        dry_run_banner = """
+        <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:12px 16px;margin-bottom:24px;border-radius:4px;">
+          <strong style="color:#92400e;">⚠️ DRY-RUN MODE</strong>
+          <span style="color:#92400e;font-size:13px;"> — No actual emails were sent.</span>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>LinkedIn Outreach Report</title>
+</head>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="680" cellpadding="0" cellspacing="0" style="max-width:680px;width:100%;">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);border-radius:16px 16px 0 0;padding:36px 40px 28px;">
+            <div style="display:flex;align-items:center;">
+              <div style="font-size:28px;margin-bottom:8px;">📊</div>
+              <div>
+                <h1 style="margin:0;color:#fff;font-size:22px;font-weight:700;letter-spacing:-0.3px;">LinkedIn Outreach Report</h1>
+                <p style="margin:6px 0 0;color:#c7d2fe;font-size:13px;">{now} {'(Dry Run)' if dry_run else ''}</p>
+              </div>
+            </div>
+          </td>
+        </tr>
+
+        <!-- Stats bar -->
+        <tr>
+          <td style="background:#4f46e5;padding:0 40px 28px;">
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="width:25%;padding:0 6px 0 0;">
+                  <div style="background:rgba(255,255,255,0.15);border-radius:12px;padding:16px;text-align:center;">
+                    <div style="color:#fff;font-size:28px;font-weight:800;line-height:1;">{total}</div>
+                    <div style="color:#c7d2fe;font-size:11px;margin-top:4px;letter-spacing:0.5px;text-transform:uppercase;">Processed</div>
+                  </div>
+                </td>
+                <td style="width:25%;padding:0 6px;">
+                  <div style="background:rgba(16,185,129,0.25);border-radius:12px;padding:16px;text-align:center;">
+                    <div style="color:#6ee7b7;font-size:28px;font-weight:800;line-height:1;">{sent_count}</div>
+                    <div style="color:#a7f3d0;font-size:11px;margin-top:4px;letter-spacing:0.5px;text-transform:uppercase;">Sent</div>
+                  </div>
+                </td>
+                <td style="width:25%;padding:0 6px;">
+                  <div style="background:rgba(239,68,68,0.25);border-radius:12px;padding:16px;text-align:center;">
+                    <div style="color:#fca5a5;font-size:28px;font-weight:800;line-height:1;">{failed_count}</div>
+                    <div style="color:#fecaca;font-size:11px;margin-top:4px;letter-spacing:0.5px;text-transform:uppercase;">Failed</div>
+                  </div>
+                </td>
+                <td style="width:25%;padding:0 0 0 6px;">
+                  <div style="background:rgba(255,255,255,0.15);border-radius:12px;padding:16px;text-align:center;">
+                    <div style="color:#fff;font-size:28px;font-weight:800;line-height:1;">{success_rate}%</div>
+                    <div style="color:#c7d2fe;font-size:11px;margin-top:4px;letter-spacing:0.5px;text-transform:uppercase;">Success</div>
+                  </div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Main content -->
+        <tr>
+          <td style="background:#fff;border-radius:0 0 16px 16px;padding:32px 40px;">
+            {dry_run_banner}
+
+            <h2 style="margin:0 0 16px;color:#1e293b;font-size:16px;font-weight:700;">Lead Details</h2>
+
+            <div style="overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;min-width:600px;">
+                <thead>
+                  <tr style="background:#f8fafc;">
+                    <th style="padding:12px;text-align:left;font-size:11px;color:#94a3b8;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;border-bottom:1px solid #e2e8f0;">#</th>
+                    <th style="padding:12px;text-align:left;font-size:11px;color:#94a3b8;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;border-bottom:1px solid #e2e8f0;">Contact</th>
+                    <th style="padding:12px;text-align:left;font-size:11px;color:#94a3b8;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;border-bottom:1px solid #e2e8f0;">Email</th>
+                    <th style="padding:12px;text-align:left;font-size:11px;color:#94a3b8;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;border-bottom:1px solid #e2e8f0;">Status</th>
+                    <th style="padding:12px;text-align:left;font-size:11px;color:#94a3b8;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;border-bottom:1px solid #e2e8f0;">Subject</th>
+                    <th style="padding:12px;text-align:left;font-size:11px;color:#94a3b8;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;border-bottom:1px solid #e2e8f0;">JD Snippet</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lead_rows}
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Footer -->
+            <div style="margin-top:28px;padding-top:20px;border-top:1px solid #f1f5f9;text-align:center;">
+              <p style="margin:0;color:#94a3b8;font-size:12px;">Sent automatically by <strong style="color:#6366f1;">LinkedIn Outreach Bot</strong> · {now}</p>
+            </div>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    return html
+
+
+def send_run_report(contacts_processed: list[dict], sent_count: int, failed_count: int, dry_run: bool) -> None:
+    """Send a beautiful HTML summary report of the processed leads to NOTIFICATION_EMAIL if configured."""
+    notification_email = os.getenv("NOTIFICATION_EMAIL", "").strip()
+    if not notification_email:
+        log.info("[REPORT] No NOTIFICATION_EMAIL configured in .env. Skipping summary report.")
+        return
+
+    # Parse comma-separated emails
+    recipients = [email.strip() for email in notification_email.split(",") if email.strip()]
+    if not recipients:
+        log.info("[REPORT] No valid recipients found in NOTIFICATION_EMAIL. Skipping summary report.")
+        return
+
+    if not contacts_processed:
+        log.info("[REPORT] No contacts processed in this run. Skipping summary report.")
+        return
+
+    log.info(f"[REPORT] Compiling and sending run report to {', '.join(recipients)}...")
+
+    subject = f"📊 LinkedIn Outreach Report: {sent_count} Sent, {failed_count} Failed"
+    html_body = _build_html_report(contacts_processed, sent_count, failed_count, dry_run)
+
+    # Plain-text fallback
+    lines = [
+        f"LinkedIn Outreach Report — {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Processed: {len(contacts_processed)} | Sent: {sent_count} | Failed: {failed_count}",
+        "",
+    ]
+    for idx, c in enumerate(contacts_processed, start=1):
+        lines.append(f"#{idx} {c.get('name','N/A')} <{c.get('email','N/A')}> [{c.get('company','N/A')}] — {c.get('status','N/A')}")
+    plain_body = "\n".join(lines)
+
+    # Build multipart/alternative message (HTML preferred, plain fallback)
+    msg = MIMEMultipart("alternative")
+    msg["From"]    = f"Outreach Automation <{GMAIL_ADDRESS}>"
+    msg["To"]      = ", ".join(recipients)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(plain_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    if dry_run:
+        log.info(f"[DRY-RUN] Would send HTML report to {', '.join(recipients)}")
+        log.info(f"[DRY-RUN] Subject: {subject}")
+        return
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_ADDRESS, recipients, msg.as_string())
+        log.info(f"[REPORT] ✅ HTML report sent to {', '.join(recipients)}")
+    except Exception as e:
+        log.error(f"[REPORT] ❌ Failed to send report to {', '.join(recipients)}: {e}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run(dry_run: bool = False, limit: int = DAILY_SEND_LIMIT) -> None:
@@ -347,6 +542,7 @@ def run(dry_run: bool = False, limit: int = DAILY_SEND_LIMIT) -> None:
     # 5. Process each contact
     sent_count   = 0
     failed_count = 0
+    processed_contacts = []
 
     for i, contact in enumerate(contacts, start=1):
         log.info(f"[{i}/{len(contacts)}] Processing: {contact['email']} ({contact['company'] or 'unknown company'})")
@@ -365,6 +561,17 @@ def run(dry_run: bool = False, limit: int = DAILY_SEND_LIMIT) -> None:
         # Send (or dry-run)
         success = send_email(contact["email"], subject, body, dry_run)
 
+        # Record result for reporting
+        processed_contacts.append({
+            "name": contact.get("name", ""),
+            "company": contact.get("company", ""),
+            "email": contact.get("email", ""),
+            "snippet": contact.get("snippet", ""),
+            "subject": subject,
+            "body": body,
+            "status": "SENT" if success else "FAILED"
+        })
+
         if success:
             sent_count += 1
             if not dry_run:
@@ -377,7 +584,11 @@ def run(dry_run: bool = False, limit: int = DAILY_SEND_LIMIT) -> None:
             pause = 3 if dry_run else 8
             time.sleep(pause)
 
-    # 6. Summary
+    # 6. Send run report summary
+    if processed_contacts:
+        send_run_report(processed_contacts, sent_count, failed_count, dry_run)
+
+    # 7. Summary
     log.info("=" * 60)
     log.info("[MAIL AGENT] Run complete")
     log.info(f"  Contacts processed : {len(contacts)}")
