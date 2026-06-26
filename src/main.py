@@ -333,49 +333,58 @@ def _update_row(sheet, email, col_index, value):
         log.error(f"Could not update row for {email}: {e}")
 
 
-def send_curated_sheet_report(recipient_email: str) -> bool:
+def send_curated_sheet_report(recipient_email: str, today_contacts: list | None = None) -> bool:
     """
-    Fetches outreach entries with 'extracted' status from the Google Sheet,
-    compiles a clean HTML report showing only their email and JD, and emails it.
+    Sends a clean HTML report of TODAY's newly extracted leads (email + JD summary).
+    `today_contacts` should be a list of dicts with keys: email, jd_summary.
+    If not provided, falls back to fetching 'extracted' rows from the Google Sheet.
     """
-    log.info(f"[REPORT] Fetching 'extracted' records from Google Sheet to send curated report to {recipient_email}...")
-    try:
-        sheet = get_sheet()
-        records = sheet.get_all_records()
-    except Exception as e:
-        log.error(f"[REPORT] Failed to fetch records from sheet: {e}")
-        return False
-
     today_str = str(datetime.today().date())
+    log.info(f"[REPORT] Fetching 'extracted' records from Google Sheet to send curated report to {recipient_email}...")
+
     extracted_records = []
-    
-    # Filter rows with 'extracted' status (leads found but not yet emailed)
-    for r in records:
-        status = str(r.get("Status", "")).lower().strip()
-        if status == "extracted":
-            extracted_records.append(r)
-            
+
+    # ── Prefer the in-memory list from the current run ────────────────────────
+    if today_contacts:
+        for c in today_contacts:
+            extracted_records.append({
+                "Email":      c.get("email", "N/A"),
+                "JD Summary": c.get("jd_summary", c.get("snippet", "N/A")),
+            })
+    else:
+        # Fallback: query the sheet for rows added today
+        try:
+            sheet = get_sheet()
+            records = sheet.get_all_records()
+        except Exception as e:
+            log.error(f"[REPORT] Failed to fetch records from sheet: {e}")
+            return False
+
+        for r in records:
+            status = str(r.get("Status", "")).lower().strip()
+            emailed_on = str(r.get("Emailed On", "")).strip()
+            # Only include rows that were extracted/emailed today
+            if today_str in emailed_on or status == "extracted":
+                extracted_records.append(r)
+
     if not extracted_records:
-        log.info("[REPORT] No pending 'extracted' records found in Google Sheet.")
-        
+        log.info("[REPORT] No new leads extracted today. Skipping curated report.")
+        return True
+
     total = len(extracted_records)
-    
+
     # Build rows HTML containing only Email and JD Summary columns
     rows_html = ""
     for r in extracted_records:
         email = r.get("Email", "N/A")
-        # Fallback to 'Replied' column as the sheet appends misaligned columns on row insert
         jd_summary = r.get("JD Summary", "") or r.get("Replied", "") or r.get("jd_summary", "") or "N/A"
-        
+
         rows_html += f"""
         <tr>
           <td><a href="mailto:{email}" class="email-link">{email}</a></td>
           <td class="jd-text">{jd_summary}</td>
         </tr>
         """
-        
-    if not extracted_records:
-        rows_html = "<tr><td colspan='2' style='text-align:center; color:#999;'>No extracted leads currently pending outreach.</td></tr>"
 
     html_template = """<!DOCTYPE html>
 <html>
@@ -386,6 +395,7 @@ def send_curated_sheet_report(recipient_email: str) -> bool:
     .container {{ max-width: 850px; margin: 0 auto; padding: 25px; border: 1px solid #e0e0e0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
     .header {{ background: linear-gradient(135deg, #0073b1, #005582); color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center; }}
     .header h1 {{ margin: 0; font-size: 24px; font-weight: 600; letter-spacing: 0.5px; }}
+    .header p {{ margin: 6px 0 0; color: #bfdbf7; font-size: 13px; }}
     .stats {{ text-align: center; margin: 20px 0; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0; }}
     .stat-val {{ font-size: 28px; font-weight: bold; color: #0073b1; }}
     .stat-lbl {{ font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 600; }}
@@ -402,14 +412,15 @@ def send_curated_sheet_report(recipient_email: str) -> bool:
 <body>
   <div class="container">
     <div class="header">
-      <h1>Extracted Leads Report</h1>
+      <h1>📋 Today's Extracted Leads</h1>
+      <p>{today_str}</p>
     </div>
-    
+
     <div class="stats">
       <div class="stat-val">{total}</div>
-      <div class="stat-lbl">Emails Extracted (Pending Outreach)</div>
+      <div class="stat-lbl">New Emails Extracted Today</div>
     </div>
-    
+
     <table>
       <thead>
         <tr>
@@ -421,7 +432,7 @@ def send_curated_sheet_report(recipient_email: str) -> bool:
         {rows_html}
       </tbody>
     </table>
-    
+
     <div class="footer">
       <p>This report was automatically curated and generated by your LinkedIn Outreach Agent.</p>
     </div>
@@ -430,24 +441,25 @@ def send_curated_sheet_report(recipient_email: str) -> bool:
 </html>"""
 
     body_html = html_template.format(
+        today_str=today_str,
         total=total,
         rows_html=rows_html
     )
-    
-    subject = f"LinkedIn Outreach: {total} Extracted Leads Pending — {today_str}"
-    
+
+    subject = f"📋 LinkedIn Outreach: {total} New Leads Extracted Today — {today_str}"
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = f"Outreach Report <{GMAIL_ADDRESS}>"
     msg["To"]      = recipient_email
-    
-    plain_text = f"LinkedIn Outreach Report ({today_str})\n\nTotal Extracted: {total}\nPending Emails:\n"
+
+    plain_text = f"LinkedIn Outreach — Today's Extracted Leads ({today_str})\n\nTotal New Today: {total}\n\n"
     for r in extracted_records:
         plain_text += f"- {r.get('Email', 'N/A')}\n"
-        
+
     msg.attach(MIMEText(plain_text, "plain"))
     msg.attach(MIMEText(body_html, "html"))
-    
+
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
@@ -2006,8 +2018,9 @@ if __name__ == "__main__":
             import mail_agent
             mail_agent.run(dry_run=False, limit=DAILY_SEND_LIMIT)
 
-            # Curated HTML Report Dispatch
+            # Curated HTML Report Dispatch — pass today's contacts directly so
+            # recipients see only this run's leads, not the full historical sheet
             report_emails = os.getenv("REPORT_EMAILS", os.getenv("NOTIFICATION_EMAIL", GMAIL_ADDRESS))
-            send_curated_sheet_report(report_emails)
+            send_curated_sheet_report(report_emails, today_contacts=getattr(mail_agent, "_last_run_contacts", None))
         else:
             log.warning("[PIPELINE] Scrape did not succeed or found 0 leads across all roles — mail agent not triggered.")

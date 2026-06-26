@@ -161,6 +161,24 @@ def infer_role(snippet: str, company: str) -> str:
     return "AI Engineer"   # sensible default
 
 
+def _strip_subject_from_body(subject: str, body: str) -> str:
+    """
+    If the LLM echoes the subject line as the first line of the body,
+    strip it out. Handles exact match and case-insensitive match.
+    """
+    lines = body.splitlines()
+    if not lines:
+        return body
+    first = lines[0].strip()
+    # Remove if it's a repeat of the subject (exact or close match)
+    if first.lower() == subject.strip().lower():
+        body = "\n".join(lines[1:]).lstrip("\n")
+    # Also strip common LLM prefixes like "Subject: ..."
+    elif first.lower().startswith(("subject:", "subject line:")):
+        body = "\n".join(lines[1:]).lstrip("\n")
+    return body
+
+
 def draft_email_with_llm(client: Groq, contact: dict) -> tuple[str, str]:
     """
     Use Groq to personalise the resume skeleton for this specific contact.
@@ -233,6 +251,9 @@ Output the subject line first, then '---BODY---', then the email body.
     if not subject or len(subject) > 120:
         subject = f"{role} Application — {company}"
 
+    # Strip subject if LLM echoed it as first line of body
+    body = _strip_subject_from_body(subject, body)
+
     return subject, body
 
 
@@ -270,11 +291,13 @@ def validate_email_with_llm(client: Groq, subject: str, body: str) -> tuple[str,
     raw = resp.choices[0].message.content.strip()
 
     if "---BODY---" in raw:
-        parts   = raw.split("---BODY---", 1)
+        parts       = raw.split("---BODY---", 1)
         new_subject = parts[0].strip()
         new_body    = parts[1].strip()
+        # Strip subject if LLM echoed it as first line of body
+        new_body = _strip_subject_from_body(new_subject, new_body)
         return new_subject, new_body
-    
+
     # Fallback to original if formatting fails
     return subject, body
 
@@ -510,6 +533,10 @@ def send_run_report(contacts_processed: list[dict], sent_count: int, failed_coun
         log.error(f"[REPORT] ❌ Failed to send report to {', '.join(recipients)}: {e}")
 
 
+# Module-level var so main.py can read today's contacts after calling run()
+_last_run_contacts: list | None = None
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run(dry_run: bool = False, limit: int = DAILY_SEND_LIMIT) -> None:
@@ -588,7 +615,11 @@ def run(dry_run: bool = False, limit: int = DAILY_SEND_LIMIT) -> None:
     if processed_contacts:
         send_run_report(processed_contacts, sent_count, failed_count, dry_run)
 
-    # 7. Summary
+    # 7. Expose contacts for external callers (e.g. main.py curated report)
+    global _last_run_contacts
+    _last_run_contacts = processed_contacts
+
+    # 8. Summary
     log.info("=" * 60)
     log.info("[MAIL AGENT] Run complete")
     log.info(f"  Contacts processed : {len(contacts)}")
